@@ -55,6 +55,18 @@ namespace ecdh_ChaCha20_Poly1305 {
 			return {std::move(privkey), std::move(pubkey)};
 		}
 
+		const unsigned char *get_first_pubkey_to_hash (const pubkey_t &a, const pubkey_t &b) {
+			for (size_t i = 0; i < a.size(); ++i) {
+				if (a.at(i) < b.at(i)) {
+					return a.data();
+				} else if (a.at(i) > b.at(i)) {
+					return b.data();
+				}
+			}
+
+			throw std::runtime_error("error: pubkeys are equal!");
+		}
+
 		sharedkey_t generate_sharedkey_with (const keypair_t &keypair, const pubkey_t &pubkey) {
 			sharedkey_t sharedkey;
 			unsigned char scalar[crypto_scalarmult_BYTES];
@@ -63,19 +75,11 @@ namespace ecdh_ChaCha20_Poly1305 {
 				throw std::runtime_error("ERROR while generating shared key");
 			}
 
-			const unsigned char *first = nullptr, *second = nullptr;
-			for (size_t i = 0; i < keypair.pubkey.size(); ++i) {
-				if (keypair.pubkey.at(i) < pubkey.at(i)) {
-					first = keypair.pubkey.data();
-					second = pubkey.data();
-				} else if (keypair.pubkey.at(i) > pubkey.at(i)) {
-					first = pubkey.data();
-					second = keypair.pubkey.data();
-				}
-			}
-			if (!first || !second) {
-				throw std::runtime_error("error: pubkeys are equal!");
-			}
+			const unsigned char *first = get_first_pubkey_to_hash(keypair.pubkey, pubkey);
+			assert (first != nullptr);
+			const unsigned char *second = (first == keypair.pubkey.data() ? pubkey.data() : keypair.pubkey.data());
+			assert(first != second);
+			assert(second != nullptr);
 
 			crypto_generichash_state h;
 			crypto_generichash_init(&h, NULL, 0U, crypto_generichash_BYTES);
@@ -146,6 +150,5 @@ namespace ecdh_ChaCha20_Poly1305 {
 			return std::string((const char *)decrypted, decrypted_len);
 		}
 };
-
 
 #endif //UNTITLED_ECDH_CHACHA20_POLY1305_HPP
