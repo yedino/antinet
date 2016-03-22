@@ -10,13 +10,13 @@
 #include "external/c_UDPasync.hpp"
 
 std::fstream logger("./log", std::ios_base::trunc | std::ios_base::in | std::ios_base::out);
-std::atomic<bool> end;
+std::atomic<bool> stop_process;
 
 void start_recieving (c_UDPasync &connection,
 				const ecdh_ChaCha20_Poly1305::sharedkey_t &shared_key,
 				const ecdh_ChaCha20_Poly1305::nonce_t &nonce) {
 
-	while (!end) {
+	while (!stop_process) {
 		if (connection.has_messages()) {
 			std::string msg = connection.pop_message();
 			std::string decrypted = ecdh_ChaCha20_Poly1305::decrypt(msg, shared_key, nonce);
@@ -46,7 +46,7 @@ void handle_sending (c_UDPasync &connection,
 
 	std::string msg;
 
-	while (!end) {
+	while (!stop_process) {
 		std::cout << "#> ";
 		std::getline(std::cin, msg);
 		std::string encrypted = ecdh_ChaCha20_Poly1305::encrypt(msg, shared_key, nonce);
@@ -98,131 +98,112 @@ ecdh_ChaCha20_Poly1305::keypair_t load_keypair (const std::string &filename) {
 	return result;
 }
 
-//ecdh_ChaCha20_Poly1305::nonce_t do_handshake (const std::string &ipv6_addr,
-//				const ecdh_ChaCha20_Poly1305::pubkey_t &pubkey,
-//				c_UDPasync &connection) {
-//
-//	std::cout << "handshake started...\n";
-//	logger << "handshake started...\n";
-//	auto handshake_keypair = ecdh_ChaCha20_Poly1305::generate_keypair();
-//	std::atomic<bool> stop(false);
-//
-//	auto serialized_handshake_pubkey = ecdh_ChaCha20_Poly1305::serialize(handshake_keypair.pubkey.data(), handshake_keypair.pubkey.size());
-//	auto exec = [&] () {
-//			std::cout << "1 ";
-//			std::cout.flush();
-//			while (!stop && !end) {
-//				std::cout << "2 ";
-//				std::cout.flush();
-//				connection.send(serialized_handshake_pubkey); // TODO
-//				if (connection.has_messages()) {
-//					std::cout << "3 ";
-//					std::cout.flush();
-//					auto msg = connection.pop_message();
-//					std::cout << "msg: " << msg << '\n';
-//					std::cout.flush();
-//					if (msg.size() == crypto_box_PUBLICKEYBYTES) {
-//						return msg;
-//					}
-//				}
-//				std::cout << "4 ";
-//				std::cout.flush();
-//				std::this_thread::yield();
-//			}
-//			throw std::runtime_error("handshake failed");
-//	};
-//
-//	auto task = std::packaged_task<std::string ()>(exec);
-//	auto handle = task.get_future();
-//
-//	if (handle.wait_for(std::chrono::seconds(100000)) == std::future_status::timeout) {
-//		stop = true;
-//		std::this_thread::sleep_for(std::chrono::seconds(1));
-//	} else {
-//		auto handshake_pubkey = ecdh_ChaCha20_Poly1305::deserialize_pubkey(handle.get());
-//		auto result = ecdh_ChaCha20_Poly1305::generate_nonce_with(handshake_keypair, handshake_pubkey);
-//		std::cout << "done\n";
-//		logger << "done\n";
-//		return result;
-//	}
-//	throw std::runtime_error("handshake failed");
-//}
-
 ecdh_ChaCha20_Poly1305::nonce_t do_handshake (const std::string &ipv6_addr,
 				const ecdh_ChaCha20_Poly1305::pubkey_t &pubkey,
 				c_UDPasync &connection) {
 
 	std::cout << "handshake started...\n";
 	logger << "handshake started...\n";
-	auto my_handshake_keypair = ecdh_ChaCha20_Poly1305::generate_keypair();
-	std::string handshake_pubkey;
+	auto handshake_keypair = ecdh_ChaCha20_Poly1305::generate_keypair();
+	std::atomic<bool> stop_thread(false);
 
-	auto my_handshake_pubkey = ecdh_ChaCha20_Poly1305::serialize(my_handshake_keypair.pubkey.data(), my_handshake_keypair.pubkey.size());
-	connection.send(my_handshake_pubkey);
-
-	while (!end) {
-		if (connection.has_messages()) {
-			auto msg = connection.pop_message();
-			if (msg.size() == crypto_box_PUBLICKEYBYTES * 2) {
-				handshake_pubkey = msg;
-				break;
+	auto serialized_handshake_pubkey = ecdh_ChaCha20_Poly1305::serialize(handshake_keypair.pubkey.data(), handshake_keypair.pubkey.size());
+	auto exec = [&] () {
+			connection.send(serialized_handshake_pubkey); // TODO
+			while (!stop_thread) {
+				if (connection.has_messages()) {
+					auto msg = connection.pop_message();
+					if (msg.size() == crypto_box_PUBLICKEYBYTES * 2) {
+						return msg;
+					}
+				}
+				if (stop_process) {
+					throw std::runtime_error("aborting handshake");
+				}
+				std::this_thread::yield();
 			}
+			throw std::runtime_error("handshake failed");
+	};
+
+	auto handle = std::async(std::launch::async, exec);
+
+	if (handle.wait_for(std::chrono::seconds(15)) == std::future_status::timeout) {
+		stop_thread = true;
+		handle.get();
+	} else {
+		if (!handle.valid()) {
+			throw std::runtime_error("handshake failed");
 		}
+
+		auto handshake_pubkey = ecdh_ChaCha20_Poly1305::deserialize_pubkey(handle.get());
+		auto result = ecdh_ChaCha20_Poly1305::generate_nonce_with(handshake_keypair, handshake_pubkey);
+		return result;
 	}
-
-	auto deserialized_handshake_pubkey = ecdh_ChaCha20_Poly1305::deserialize_pubkey(handshake_pubkey);
-
-	auto result = ecdh_ChaCha20_Poly1305::generate_nonce_with(my_handshake_keypair, deserialized_handshake_pubkey);
-	std::cout << "done\n";
-	logger << "done\n";
-	return result;
+	throw std::runtime_error("handshake failed");
 }
 
 void do_prehandshake (c_UDPasync &connection) { // TODO
-	connection.send("");
+	std::atomic<bool> stop(false);
+	logger << "connecting...\n";
+	std::cout << "connecting...\n";
 
-	while (!connection.has_messages()) {
-		connection.send("");
-		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	auto exec = [&] () {
+			connection.send("");
+			while (!connection.has_messages() && !stop) {
+				connection.send("");
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				if (stop_process) {
+					throw std::runtime_error("aborting prehandshake");
+				}
+			}
+
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+			connection.send("");
+	};
+
+	auto handle = std::async(std::launch::async, exec);
+	if (handle.wait_for(std::chrono::seconds(15)) == std::future_status::timeout) {
+		stop = true;
+		handle.get();
+	} else {
+		if (!handle.valid()) {
+			throw std::runtime_error("unable to connect");
+		}
+		handle.get();
+		return;
 	}
-
-	std::this_thread::sleep_for(std::chrono::seconds(1));
-	connection.send("");
+	throw std::runtime_error("unable to connect");
 }
 
 void connect (const std::string &ipv6_addr,
 				const ecdh_ChaCha20_Poly1305::pubkey_t &pubkey,
 				const ecdh_ChaCha20_Poly1305::keypair_t &keypair) { // TODO
 
-	end = false;
-	signal(SIGINT, [] (int) {
-			logger << "aborting...";
-			end = true;
-			logger.close();
-	});
-
-	ecdh_ChaCha20_Poly1305::init();
 	c_UDPasync connection(ipv6_addr, 12325, 12325);
 
-	logger << "connecting...\n";
-	std::cout << "connecting...\n";
 	do_prehandshake(connection);
 	std::cout << "connected with " << ipv6_addr << '\n';
 	logger << "connected with " << ipv6_addr << '\n';
 
+	std::cout << "generating shared key...\n";
+	logger << "generating shared key...\n";
 	ecdh_ChaCha20_Poly1305::sharedkey_t shared_key = ecdh_ChaCha20_Poly1305::generate_sharedkey_with(keypair, pubkey);
+	std::cout << "done\n";
+	logger << "done\n";
 
 	ecdh_ChaCha20_Poly1305::nonce_t nonce = do_handshake(ipv6_addr, pubkey, connection);
+	std::cout << "done\n";
+	logger << "done\n";
 
-	logger << "sharedkey: ";
-	for (auto &&c: shared_key) {
-		logger << int(c) << ' ';
-	}
-	logger << "\nnonce: ";
-	for (auto &&c: nonce) {
-		logger << int(c) << ' ';
-	}
-	logger << "\n\n";
+//	logger << "sharedkey: ";
+//	for (auto &&c: shared_key) {
+//		logger << int(c) << ' ';
+//	}
+//	logger << "\nnonce: ";
+//	for (auto &&c: nonce) {
+//		logger << int(c) << ' ';
+//	}
+//	logger << "\n\n";
 
 	std::thread receive(start_recieving, std::ref(connection), std::ref(shared_key), std::ref(nonce));
 	std::thread send(handle_sending, std::ref(connection), std::ref(shared_key), std::ref(nonce));
@@ -238,6 +219,17 @@ void debug () {
 	connect(ipv6_addr, ecdh_ChaCha20_Poly1305::deserialize_pubkey(pubkey), keypair);
 }
 
+void init () {
+	stop_process = false;
+	signal(SIGINT, [] (int) {
+			stop_process = true;
+			logger << "aborting...";
+			logger.close();
+	});
+
+	ecdh_ChaCha20_Poly1305::init();
+}
+
 void start (int argc, char **argv) {
 	if (argc < 2) {
 		//		std::cout << "type --help to show help\n";
@@ -245,6 +237,7 @@ void start (int argc, char **argv) {
 		debug();
 	}
 
+	init();
 	std::string command = std::string(argv[1]);
 
 	if (command == "--help") {
@@ -284,8 +277,10 @@ int main (int argc, char **argv) {
 		start(argc, argv);
 	} catch (std::exception &exc) {
 		std::cout << exc.what() << '\n';
+		logger << exc.what() << '\n';
 	} catch (...) {
 		std::cout << "internal error\n";
+		logger << "internal error\n";
 	}
 	return 0;
 }
