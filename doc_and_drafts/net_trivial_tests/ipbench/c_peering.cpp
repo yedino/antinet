@@ -14,8 +14,8 @@ t_peering_reference::t_peering_reference(const string &peering_addr, const strin
 
 t_peering_reference::t_peering_reference(const c_ip46_addr &peering_addr, const string_as_bin &peering_pubkey)
 	: pubkey( peering_pubkey ) , haship_addr( c_haship_addr::tag_constr_by_hash_of_pubkey() , peering_pubkey ) , peering_addr( peering_addr )
-{ 
-	_info("peering REFERENCE created, now peering_addr=" << this->peering_addr << ", and this is: " << (*this) );
+{
+//	_info("peering REFERENCE created, now peering_addr=" << this->peering_addr << ", and this is: " << (*this) );
 }
 
 // ------------------------------------------------------------------
@@ -51,11 +51,6 @@ void c_peering_udp::send_data(const char * data, size_t data_size) {
 void c_peering_udp::send_data_udp(const char * data, size_t data_size, int udp_socket) {
 	_info("Send to peer (tunneled data) data: " << string_as_dbg(data,data_size).get() ); // TODO .get
 
-	static unsigned char generated_shared_key[crypto_generichash_BYTES] = {43, 124, 179, 100, 186, 41, 101, 94, 81, 131, 17,
-					198, 11, 53, 71, 210, 232, 187, 135, 116, 6, 195, 175,
-					233, 194, 218, 13, 180, 63, 64, 3, 11};
-
-	static unsigned char nonce[crypto_aead_chacha20poly1305_NPUBBYTES] = {148, 231, 240, 47, 172, 96, 246, 79};
 	static unsigned char additional_data[] = {1, 2, 3};
 	static unsigned long long additional_data_len = 3; // TODO
 
@@ -75,7 +70,7 @@ void c_peering_udp::send_data_udp(const char * data, size_t data_size, int udp_s
 	unsigned char * ciphertext_buf = protomsg.get() + header_size; // just-pointer to part of protomsg where to write the message!
 	unsigned long long ciphertext_buf_len = 0; // encryption will write here the resulting size
 	crypto_aead_chacha20poly1305_encrypt(ciphertext_buf, &ciphertext_buf_len, (unsigned char *)data, data_size, additional_data,
-	                                     additional_data_len, NULL, nonce, generated_shared_key);
+	                                     additional_data_len, NULL, m_nonce.data(), m_sharedkey.data());
 	unsigned long long protomsg_len = ciphertext_buf_len + header_size; // the output of crypto, plus the header in front
 
 	// TODO asserts!!!

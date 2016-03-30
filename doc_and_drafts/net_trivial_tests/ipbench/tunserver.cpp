@@ -41,6 +41,7 @@ const char * disclaimer = "*** WARNING: This is a work in progress, do NOT use t
 #include <cstring>
 
 #include <sodium.h>
+#include "ecdh_ChaCha20_Poly1305.hpp"
 
 #include "libs1.hpp"
 #include "counter.hpp"
@@ -135,6 +136,10 @@ class c_tunserver {
 
 		void help_usage() const; ///< show help about usage of the program
 
+		void generate_ecdh_keypair ();
+
+		void load_keypair (); // TODO [p] load keypair from json format file
+
 		typedef enum {
 			e_route_method_from_me=1, ///< I am the oryginal sender (try hard to send it)
 			e_route_method_if_direct_peer=2, ///< Send data only if if I know the direct peer (e.g. I just route it for someone else - in star protocol the center node)
@@ -162,9 +167,11 @@ class c_tunserver {
 
 		typedef std::map< c_haship_addr, unique_ptr<c_peering> > t_peers_by_haship; ///< my peers (we always know their IPv6 - we assume here)
 		t_peers_by_haship m_peer; ///< my peers
+		typedef std::array<unsigned char, crypto_box_SECRETKEYBYTES> c_privkey; // TODO [p] move this somewhere else
 
 		c_haship_pubkey m_haship_pubkey; ///< pubkey of my IP
 		c_haship_addr m_haship_addr; ///< my haship addres
+		c_privkey m_privkey;
 		c_peering & find_peer_by_sender_peering_addr( c_ip46_addr ip ) const ;
 };
 
@@ -172,9 +179,29 @@ class c_tunserver {
 
 using namespace std; // XXX move to implementations, not to header-files later, if splitting cpp/hpp
 
+void c_tunserver::generate_ecdh_keypair () {
+	     auto keypair = ecdh_ChaCha20_Poly1305::generate_keypair();
+	     m_privkey = std::move(keypair.privkey);
+
+	     assert(m_haship_pubkey.size() == keypair.pubkey.size());
+	     for (size_t i = 0; i < keypair.pubkey.size(); ++i) { // TODO [p] copying data but types differs
+	             m_haship_pubkey.at(i) = keypair.pubkey.at(i);
+	     }
+
+	     // XXXXXXXXXXXXXXXXXXXXXX
+	     std::cerr << "\n\nXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX generating ECDH keypair:\n"
+	                                             << ecdh_ChaCha20_Poly1305::serialize(m_haship_pubkey.data(), m_haship_pubkey.size()) << '\n'
+	                                             << ecdh_ChaCha20_Poly1305::serialize(m_privkey.data(), m_privkey.size()) << '\n';
+//	m_haship_pubkey = {};
+//	m_privkey = {};
+}
+
+
 c_tunserver::c_tunserver()
  : m_tun_fd(-1), m_tun_header_offset_ipv6(0), m_sock_udp(-1)
 {
+	generate_ecdh_keypair(); // TODO [p] now we are generating random keypair
+														// instead of taking it as command line arg
 }
 
 // my key
@@ -186,8 +213,8 @@ void c_tunserver::configure_mykey_from_string(const std::string &mypub, const st
 
 // add peer
 void c_tunserver::add_peer(const t_peering_reference & peer_ref) { ///< add this as peer
-	_note("Adding peer from reference=" << peer_ref
-		<< " that reads: " << "peering-address=" << peer_ref.peering_addr << " pubkey=" << to_string(peer_ref.pubkey) << " haship_addr=" << to_string(peer_ref.haship_addr) );
+//	_note("Adding peer from reference=" << peer_ref
+//		<< " that reads: " << "peering-address=" << peer_ref.peering_addr << " pubkey=" << to_string(peer_ref.pubkey) << " haship_addr=" << to_string(peer_ref.haship_addr) );
 	auto peering_ptr = make_unique<c_peering_udp>(peer_ref);
 	// TODO(r) check if duplicated peer (map key) - warn or ignore dep on parameter
 	m_peer.emplace( std::make_pair( peer_ref.haship_addr ,  std::move(peering_ptr) ) );
@@ -288,14 +315,24 @@ c_haship_addr c_tunserver::parse_tun_ip_src_dst(const char *buff, size_t buff_si
 
 void c_tunserver::peering_ping_all_peers() {
 	_info("Sending ping to all peers");
-	for(auto & v : m_peer) { // to each peer
-		auto & target_peer = v.second;
+	for(auto && v : m_peer) { // to each peer
+		auto && target_peer = v.second;
 		auto peer_udp = unique_cast_ptr<c_peering_udp>( target_peer ); // upcast to UDP peer derived
 
 		// [protocol] build raw
 		string_as_bin cmd_data;
 		cmd_data.bytes += string_as_bin( m_haship_pubkey ).bytes;
+
+		std::cout << "\n\n\n\n\n" << "sending public key:\n"; // TODO [p]
+		std::cout << ecdh_ChaCha20_Poly1305::serialize((const unsigned char *)cmd_data.bytes.data(), cmd_data.bytes.size());
+		std::cout << "\n\n\n\n\n";
+
 		cmd_data.bytes += ";";
+
+		v.second->m_sharedkey = ecdh_ChaCha20_Poly1305::generate_sharedkey_with( {m_privkey, m_haship_pubkey} , v.second->m_pubkey);
+
+		v.second->m_nonce = {148, 231, 240, 47, 172, 96, 246, 79}; // TODO [p] move this to somewhere else
+
 		peer_udp->send_data_udp_cmd(c_protocol::e_proto_cmd_public_hi, cmd_data, m_sock_udp);
 	}
 }
@@ -303,7 +340,7 @@ void c_tunserver::peering_ping_all_peers() {
 void c_tunserver::debug_peers() {
 	_note("=== Debug peers ===");
 	for(auto & v : m_peer) { // to each peer
-		auto & target_peer = v.second;
+		auto && target_peer = v.second;
 		_info("  * Known peer on key [ " << string_as_dbg( v.first ).get() << " ] => " << (* target_peer) );
 	}
 }
@@ -329,7 +366,7 @@ void c_tunserver::route_tun_data_to_its_destination(t_route_method method, const
 			_info("ROUTE-PEER, can not find any peer!");
 		}
 		else {
-			auto & target_peer = peer_it->second;
+			auto && target_peer = peer_it->second;
 			_info("ROUTE-PEER, selected peerig next hop is: " << (*target_peer) );
 			auto peer_udp = unique_cast_ptr<c_peering_udp>( target_peer ); // upcast to UDP peer derived
 			peer_udp->send_data_udp(buff, buff_size, m_sock_udp); // <--- ***
@@ -410,14 +447,10 @@ void c_tunserver::event_loop() {
 			c_protocol::t_proto_cmd cmd = static_cast<c_protocol::t_proto_cmd>( buf[1] );
 
 			if (cmd == c_protocol::e_proto_cmd_tunneled_data) { // [protocol] tunneled data
-				c_peering & sender_as_peering = find_peer_by_sender_peering_addr( peer_ip ); // warn: returned value depends on m_peer[], do not invalidate that!!! 
+				c_peering & sender_as_peering = find_peer_by_sender_peering_addr( peer_ip ); // warn: returned value depends on m_peer[], do not invalidate that!!!
 				_warn(" ********************************************** sender is: " << sender_as_peering);
 
-				static unsigned char generated_shared_key[crypto_generichash_BYTES] = {43, 124, 179, 100, 186, 41, 101, 94, 81, 131, 17,
-								198, 11, 53, 71, 210, 232, 187, 135, 116, 6, 195, 175,
-								233, 194, 218, 13, 180, 63, 64, 3, 11};
-				static unsigned char nonce[crypto_aead_chacha20poly1305_NPUBBYTES] = {148, 231, 240, 47, 172, 96, 246, 79};
-				static unsigned char additional_data[] = {1, 2, 3};
+				static unsigned char additional_data[] = {1, 2, 3}; // TODO [p]
 				static unsigned long long additional_data_len = 3;
 				// TODO randomize this data
 
@@ -437,7 +470,7 @@ void c_tunserver::event_loop() {
 					nullptr,
 					ciphertext_buf, ciphertext_buf_len,
 					additional_data, additional_data_len,
-					nonce, generated_shared_key);
+					sender_as_peering.m_nonce.data(), sender_as_peering.m_sharedkey.data());
 				if (r == -1) {
 					_warn("crypto verification fails");
 					continue; // skip this packet (main loop)
@@ -469,6 +502,15 @@ void c_tunserver::event_loop() {
 				string_as_bin bin_his_pubkey( cmd_data.bytes.substr(0,pos1) );
 				_info("We received pubkey=" << string_as_dbg( bin_his_pubkey ).get() );
 				t_peering_reference his_ref( peer_ip , string_as_bin( bin_his_pubkey ) );
+
+				his_ref.m_sharedkey = ecdh_ChaCha20_Poly1305::generate_sharedkey_with( {m_privkey, m_haship_pubkey} , his_ref.pubkey);
+
+				his_ref.m_nonce = {148, 231, 240, 47, 172, 96, 246, 79}; // TODO [p] move this to somewhere else
+
+				std::cout << "\n\n\n\n\n" << "receiving public key:\n"; // TODO [p]
+				std::cout << ecdh_ChaCha20_Poly1305::serialize(his_ref.pubkey.data(), his_ref.pubkey.size());
+				std::cout << "\n\n\n\n\n";
+
 				add_peer( his_ref );
 			}
 			else {
@@ -524,7 +566,7 @@ bool wip_galaxy_route_star(boost::program_options::variables_map & argm) {
 	// argm.insert(std::make_pair("K", po::variable_value( int(node_nr) , false )));
 	argm.insert(std::make_pair("peerip", po::variable_value( peer_ip , false )));
 	argm.at("peerpub") = po::variable_value( peer_pub , false );
-	argm.at("mypub") = po::variable_value( make_pubkey_for_peer_nr(node_nr)  , false );
+//	argm.at("mypub") = po::variable_value( make_pubkey_for_peer_nr(node_nr)  , false );
 	return true; // continue the test
 	// TODO@r finish auto deployment --r
 }
