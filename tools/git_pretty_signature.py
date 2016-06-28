@@ -159,7 +159,15 @@ def totag_stats(pager, encoding, check_mode=False):
 		mainloop_count += 1
 
 
-# Check if string could contain regex expression
+# check if hash match to pattern: ^[0-9a-f]+$
+def is_hash_syntax_ok(git_hash):
+	ret = re.search(r'^[0-9a-f]+$', git_hash)
+	if ret is not None:
+		return True
+	else:
+		return False
+
+# check if string could contain regex expression
 def is_string_safe(string):
 	try:
 		without_regex = re.escape(string)
@@ -178,6 +186,7 @@ def is_string_safe(string):
 def is_tag(tag_name):
 	if not is_string_safe(tag_name):
 		return False
+
 	try:
 		check_call(['git', 'describe', '--tags', '--', tag_name], stderr=STDOUT, stdout=open(os.devnull, 'w'))
 		return True
@@ -188,8 +197,9 @@ def is_tag(tag_name):
 # return True if commit point to annotated tag
 # False otherwise
 def commit_point_to_tag(commit_hash):
-	if not is_string_safe(commit_hash):
+	if not is_string_safe(commit_hash) or is_hash_syntax_ok(commit_hash):
 		return False
+
 	try:
 		check_call(['git', 'describe', '--exact-match', '--', commit_hash], stderr=STDOUT, stdout=open(os.devnull, 'w'))
 		return True
