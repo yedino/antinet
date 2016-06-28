@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import argparse
 from subprocess import check_output, call, check_call, Popen, PIPE, CalledProcessError, STDOUT
 import locale
@@ -64,7 +65,6 @@ def totag_stats(pager, encoding, check_mode=False):
 		col_tag = BColors.OKGREEN
 
 		# find the "tag" in the log - to see the lines with information about the git tag
-		# TODO secure this?
 		tag_pos = data.find("tag")
 
 		if tag_pos != -1 or not data:  # if there is a tag - or if we should end our work because no data
@@ -145,7 +145,8 @@ def totag_stats(pager, encoding, check_mode=False):
 				info_head = col_coms+"Signatures status for all commits:\n"
 				info_ft = BColors.OKBLUE + "NOTICE: No tag found in this repository\n"
 
-			info_head = "\n\n\n" + "Warning: not all git system calls are fully escaped yet. Do not use on important production accounts yet\n\n"
+			#info_head = "\n\n\nWarning: not all git system calls are fully escaped yet."            \
+			#			+ "Do not use on importantproduction accounts yet\n\n"
 
 			info_str = info_head                                    \
 						+ col_coms + str(G_totag) + ": GOOD\n"      \
@@ -158,8 +159,25 @@ def totag_stats(pager, encoding, check_mode=False):
 		mainloop_count += 1
 
 
+# Check if string could contain regex expression
+def is_string_safe(string):
+	try:
+		without_regex = re.escape(string)
+		if without_regex == string:
+			return True
+		else:
+			print("string contain illegal word!")
+			return False
+
+	except SyntaxError:
+		print("is_string_safe: SyntaxError")
+		return False
+
+
 # include unannotated tags !
 def is_tag(tag_name):
+	if not is_string_safe(tag_name):
+		return False
 	try:
 		check_call(['git', 'describe', '--tags', '--', tag_name], stderr=STDOUT, stdout=open(os.devnull, 'w'))
 		return True
@@ -170,6 +188,8 @@ def is_tag(tag_name):
 # return True if commit point to annotated tag
 # False otherwise
 def commit_point_to_tag(commit_hash):
+	if not is_string_safe(commit_hash):
+		return False
 	try:
 		check_call(['git', 'describe', '--exact-match', '--', commit_hash], stderr=STDOUT, stdout=open(os.devnull, 'w'))
 		return True
